@@ -4,7 +4,7 @@ A Flutter starter application for a small Indian chit-fund business. Financial a
 
 ## Cherry Chits website
 
-The responsive React website provides the Cherry Chits dashboard, chit groups, member enrollment/search, member passbooks, payment entry, receipts, transaction history, and contact import. It starts with one empty **Chitti Cherry** group; create additional groups by entering each chit’s total amount and duration, and the monthly installment is calculated from those values. New members can use the group defaults or enter their own chit total, duration, start date, and end date. Member passbooks let the owner mark whether prize money has been lifted and whether the Chitti is completed; saved milestones are shown as tags on member cards.
+The live website is hosted at [cherry-chits-business-manager.netlify.app](https://cherry-chits-business-manager.netlify.app/). The responsive React website provides the Cherry Chits dashboard, chit groups, member enrollment/search, member passbooks, payment entry, receipts, transaction history, and contact import. It starts with one empty **Chitti Cherry** group; create additional groups by entering each chit’s total amount and duration, and the monthly installment is calculated from those values. New members can use the group defaults or enter their own chit total, duration, start date, and end date. Member passbooks let the owner mark whether prize money has been lifted and whether the Chitti is completed; saved milestones are shown as tags on member cards.
 
 The website requires Firebase Authentication and Cloud Firestore; it deliberately has no demo-data fallback. Each signed-in account can access only its own `businesses/{uid}` records. Member, group, and payment records are loaded from Firestore in real time. Payments and installment balances are written atomically, and duplicate payment keys are checked transactionally. Chitti groups can be created and permanently deleted. Deleting a member or group removes the corresponding member/group and installment-tracking records, while global payment transactions and receipts remain available in history. These deletes are irreversible.
 
@@ -34,6 +34,15 @@ Restart Vite after changing `.env.local`. If Firebase rejects the API key, use *
 npm run build
 npm run preview
 ```
+
+The Netlify project uses `netlify.toml` (`npm run build`, publishing `dist/`, with an SPA fallback). To deploy an update from this project after installing and authenticating the Netlify CLI, run:
+
+```powershell
+netlify link
+netlify deploy --prod
+```
+
+Keep `.env.local` out of Git; it is ignored. The deployed bundle needs the Firebase Web app values at build time, either through `.env.local` or Netlify **Site configuration → Environment variables** using the `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, and `VITE_FIREBASE_APP_ID` names. If those values are not configured for a build, the site opens its Firebase setup form instead of accessing business data.
 
 On Android, open the deployed HTTPS website in Chrome and choose **Members → Import contacts**. The browser only shares contacts selected by the user. If native contact selection is unavailable, import a `.vcf` file. This is not background contact synchronization.
 
