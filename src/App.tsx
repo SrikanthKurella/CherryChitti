@@ -79,20 +79,32 @@ const addMonthsToDate = (dateString, months) => {
 };
 
 const getMemberTotalValue = (member, group) =>
-  Number(member.chitTotalAmount ?? group.totalValue);
+  Number(member.chitTotalAmount ?? group?.totalValue ?? 0);
 
 const getMemberDuration = (member, group) =>
-  Number(member.durationMonths ?? group.totalMonths);
+  Number(member.durationMonths ?? group?.totalMonths ?? 0);
 
 const getMemberMonthlyAmount = (member, group) =>
-  Number(member.monthlyAmount ?? (getMemberTotalValue(member, group) / getMemberDuration(member, group)));
+  Number(member.monthlyAmount ?? (
+    getMemberDuration(member, group) > 0
+      ? getMemberTotalValue(member, group) / getMemberDuration(member, group)
+      : 0
+  ));
 
 const getMemberStartDate = (member) => member.startDate || member.joinDate;
 
 const endDateForDuration = (startDate, duration) => {
+  if (!startDate || !Number.isInteger(duration) || duration <= 0) return '';
   const [year, month] = startDate.split('-').map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return '';
   const lastInstallmentMonth = new Date(year, month - 1 + duration, 0);
   return `${lastInstallmentMonth.getFullYear()}-${String(lastInstallmentMonth.getMonth() + 1).padStart(2, '0')}-${String(lastInstallmentMonth.getDate()).padStart(2, '0')}`;
+};
+
+const EMPTY_CHITTI_GROUP = {
+  totalValue: 0,
+  monthlyAmount: 0,
+  totalMonths: 0
 };
 
 const currentBusinessRef = () => {
@@ -539,16 +551,17 @@ export default function ChittiBusinessApp() {
     notes: ""
   });
   const [duplicateWarning, setDuplicateWarning] = useState("");
+  const initialMemberGroup = CHITTI_GROUPS[0] || EMPTY_CHITTI_GROUP;
 
   // New Member Form State
   const [newMemberForm, setNewMemberForm] = useState({
     name: "",
     phone: "",
     chittiId: "CHIT-1",
-    chitTotalAmount: String(CHITTI_GROUPS[0].totalValue),
-    durationMonths: String(CHITTI_GROUPS[0].totalMonths),
+    chitTotalAmount: String(initialMemberGroup.totalValue),
+    durationMonths: String(initialMemberGroup.totalMonths),
     startDate: getKolkataDateString(),
-    endDate: endDateForDuration(getKolkataDateString(), CHITTI_GROUPS[0].totalMonths),
+    endDate: endDateForDuration(getKolkataDateString(), initialMemberGroup.totalMonths),
     nominee: "",
     address: ""
   });
@@ -656,7 +669,7 @@ export default function ChittiBusinessApp() {
   const memberFinancials = useMemo(() => {
     const map = {};
     members.forEach(m => {
-      const chitti = CHITTI_GROUPS.find(c => c.id === m.chittiId) || CHITTI_GROUPS[0];
+      const chitti = CHITTI_GROUPS.find(c => c.id === m.chittiId) || EMPTY_CHITTI_GROUP;
       const memberPayments = payments.filter(p => p.memberId === m.id);
       const totalValue = getMemberTotalValue(m, chitti);
       const monthlyAmount = getMemberMonthlyAmount(m, chitti);
@@ -789,8 +802,8 @@ export default function ChittiBusinessApp() {
 
       const fin = memberFinancials[m.id];
       if (statusFilter === "uptodate") return fin?.isMonthCleared;
-      if (statusFilter === "due") return !fin?.isMonthCleared && (fin?.overallArrears || 0) <= getMemberMonthlyAmount(m, chitti || CHITTI_GROUPS[0]);
-      if (statusFilter === "overdue") return (fin?.overallArrears || 0) > getMemberMonthlyAmount(m, chitti || CHITTI_GROUPS[0]);
+      if (statusFilter === "due") return !fin?.isMonthCleared && (fin?.overallArrears || 0) <= getMemberMonthlyAmount(m, chitti || EMPTY_CHITTI_GROUP);
+      if (statusFilter === "overdue") return (fin?.overallArrears || 0) > getMemberMonthlyAmount(m, chitti || EMPTY_CHITTI_GROUP);
 
       return true;
     });
@@ -993,7 +1006,7 @@ export default function ChittiBusinessApp() {
 
   const openUpdateMoneyModal = (member) => {
     setSelectedMemberForPayment(member);
-    const chitti = CHITTI_GROUPS.find(c => c.id === member.chittiId) || CHITTI_GROUPS[0];
+    const chitti = CHITTI_GROUPS.find(c => c.id === member.chittiId) || EMPTY_CHITTI_GROUP;
     const fin = memberFinancials[member.id];
     const monthlyAmount = getMemberMonthlyAmount(member, chitti);
     
@@ -1023,7 +1036,7 @@ export default function ChittiBusinessApp() {
     }
 
     const chitti = CHITTI_GROUPS.find(c => c.id === selectedMemberForPayment.chittiId);
-    const memberTotalValue = getMemberTotalValue(selectedMemberForPayment, chitti || CHITTI_GROUPS[0]);
+    const memberTotalValue = getMemberTotalValue(selectedMemberForPayment, chitti || EMPTY_CHITTI_GROUP);
     const remainingAmount = memberFinancials[selectedMemberForPayment.id]?.remainingChitBalance ?? memberTotalValue;
     if (amountNum > remainingAmount) {
       notify(`Payment exceeds the remaining Chitti balance of ${formatINR(remainingAmount)}`, "error");
@@ -1053,15 +1066,15 @@ export default function ChittiBusinessApp() {
     const installmentMonth = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, '0')}`;
     const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
     const startDate = new Date(`${selectedMemberForPayment.startDate}T00:00:00`);
-    const durationMonths = getMemberDuration(selectedMemberForPayment, chitti || CHITTI_GROUPS[0]);
+    const durationMonths = getMemberDuration(selectedMemberForPayment, chitti || EMPTY_CHITTI_GROUP);
     const installmentIndex = (monthStart.getFullYear() - startDate.getFullYear()) * 12 +
       monthStart.getMonth() - startDate.getMonth();
-    const monthlyPaise = Math.round(getMemberMonthlyAmount(selectedMemberForPayment, chitti || CHITTI_GROUPS[0]) * 100);
+    const monthlyPaise = Math.round(getMemberMonthlyAmount(selectedMemberForPayment, chitti || EMPTY_CHITTI_GROUP) * 100);
     const finalInstallmentPaise = Math.max(0, Math.round(memberTotalValue * 100) - monthlyPaise * (durationMonths - 1));
     const duePaise = installmentIndex === durationMonths - 1 ? finalInstallmentPaise : monthlyPaise;
     if (!memberIsScheduledInMonth(
       selectedMemberForPayment,
-      chitti || CHITTI_GROUPS[0],
+      chitti || EMPTY_CHITTI_GROUP,
       paymentForm.month
     ) || duePaise <= 0) {
       notify('The selected installment month is outside this member’s schedule.', 'error');
@@ -1776,7 +1789,7 @@ export default function ChittiBusinessApp() {
                               const fin = memberFinancials[pay.memberId];
                               const member = members.find(item => item.id === pay.memberId);
                               const memberTotalValue = member
-                                ? getMemberTotalValue(member, chitti || CHITTI_GROUPS[0])
+                                ? getMemberTotalValue(member, chitti || EMPTY_CHITTI_GROUP)
                                 : chitti?.totalValue;
                               setActiveReceipt({
                                 ...pay,
@@ -2085,7 +2098,7 @@ export default function ChittiBusinessApp() {
             {/* Member Cards Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredMembers.map((member) => {
-                const chitti = CHITTI_GROUPS.find(c => c.id === member.chittiId) || CHITTI_GROUPS[0];
+                const chitti = CHITTI_GROUPS.find(c => c.id === member.chittiId) || EMPTY_CHITTI_GROUP;
                 const memberTotalValue = getMemberTotalValue(member, chitti);
                 const memberMonthlyAmount = getMemberMonthlyAmount(member, chitti);
                 const memberDuration = getMemberDuration(member, chitti);
@@ -2295,7 +2308,7 @@ export default function ChittiBusinessApp() {
                         const fin = memberFinancials[p.memberId];
                         const member = members.find(item => item.id === p.memberId);
                         const memberTotalValue = member
-                          ? getMemberTotalValue(member, chitti || CHITTI_GROUPS[0])
+                          ? getMemberTotalValue(member, chitti || EMPTY_CHITTI_GROUP)
                           : chitti?.totalValue;
 
                         return (
@@ -2443,7 +2456,7 @@ export default function ChittiBusinessApp() {
           <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-5 sm:p-6 border border-slate-100 animate-scaleUp">
             
             {(() => {
-              const chitti = CHITTI_GROUPS.find(c => c.id === selectedMemberForPayment.chittiId) || CHITTI_GROUPS[0];
+              const chitti = CHITTI_GROUPS.find(c => c.id === selectedMemberForPayment.chittiId) || EMPTY_CHITTI_GROUP;
               const fin = memberFinancials[selectedMemberForPayment.id];
               const memberTotalValue = getMemberTotalValue(selectedMemberForPayment, chitti);
               const memberMonthlyAmount = getMemberMonthlyAmount(selectedMemberForPayment, chitti);
@@ -2863,7 +2876,7 @@ export default function ChittiBusinessApp() {
                 <select
                   value={newMemberForm.chittiId}
                   onChange={(e) => {
-                    const group = CHITTI_GROUPS.find(item => item.id === e.target.value) || CHITTI_GROUPS[0];
+                    const group = CHITTI_GROUPS.find(item => item.id === e.target.value) || EMPTY_CHITTI_GROUP;
                     const durationMonths = group.totalMonths;
                     setNewMemberForm({
                       ...newMemberForm,
@@ -3046,7 +3059,7 @@ export default function ChittiBusinessApp() {
           <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full p-5 sm:p-6 border border-slate-100 animate-scaleUp">
             
             {(() => {
-              const chitti = CHITTI_GROUPS.find(c => c.id === memberDetailModal.chittiId) || CHITTI_GROUPS[0];
+              const chitti = CHITTI_GROUPS.find(c => c.id === memberDetailModal.chittiId) || EMPTY_CHITTI_GROUP;
               const memberTotalValue = getMemberTotalValue(memberDetailModal, chitti);
               const memberMonthlyAmount = getMemberMonthlyAmount(memberDetailModal, chitti);
               const fin = memberFinancials[memberDetailModal.id] || { totalPaidLifetime: 0, remainingChitBalance: memberTotalValue };

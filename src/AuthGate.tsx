@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { Component, useEffect, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react';
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -8,6 +8,48 @@ import {
 } from 'firebase/auth';
 import { firebaseAuth, firebaseConfigured } from './firebase';
 import ChittiBusinessApp from './App';
+
+class DashboardErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Business dashboard failed to render.', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <main className="min-h-screen grid place-items-center bg-slate-50 p-5">
+          <section className="max-w-lg rounded-2xl border border-rose-200 bg-white p-6 shadow-sm">
+            <h1 className="text-lg font-bold text-rose-800">The business dashboard could not open</h1>
+            <p className="mt-2 text-sm text-slate-700">
+              Your records have not been changed. Reload the page and try again.
+            </p>
+            <details className="mt-3 text-xs text-slate-600">
+              <summary className="cursor-pointer font-semibold">Technical details</summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words">{this.state.error.message}</pre>
+            </details>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="mt-4 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+            >
+              Reload app
+            </button>
+          </section>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const configuredValue = (value: string | undefined) =>
   value && !/^(your|example|placeholder|replace|todo|<)/i.test(value.trim())
@@ -245,5 +287,7 @@ export default function AuthGate() {
   if (checkingAuth) {
     return <main className="min-h-screen grid place-items-center bg-slate-50"><span className="text-emerald-800">Loading secure session…</span></main>;
   }
-  return user ? <ChittiBusinessApp /> : <AuthScreen onEditConfig={editFirebaseConfig} />;
+  return user
+    ? <DashboardErrorBoundary><ChittiBusinessApp /></DashboardErrorBoundary>
+    : <AuthScreen onEditConfig={editFirebaseConfig} />;
 }

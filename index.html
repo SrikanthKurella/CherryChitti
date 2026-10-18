@@ -8,7 +8,27 @@
     <title>Chitti Business Manager</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main id="app-startup" role="status" style="max-width: 36rem; margin: 4rem auto; padding: 2rem; font-family: system-ui, sans-serif; color: #0f172a; background: white; border: 1px solid #e2e8f0; border-radius: 1rem;">
+        <h1>Starting Cherry Chits…</h1>
+        <p>If this message stays here, the app could not start. Check that the development server is running, then refresh this page.</p>
+        <p id="app-startup-error" hidden></p>
+      </main>
+    </div>
+    <script>
+      window.addEventListener('error', function (event) {
+        var errorMessage = document.getElementById('app-startup-error');
+        if (!errorMessage) return;
+        errorMessage.hidden = false;
+        errorMessage.textContent = 'Startup error: ' + (event.message || 'The app script could not be loaded.');
+      });
+      window.addEventListener('unhandledrejection', function (event) {
+        var errorMessage = document.getElementById('app-startup-error');
+        if (!errorMessage) return;
+        errorMessage.hidden = false;
+        errorMessage.textContent = 'Startup error: ' + (event.reason && event.reason.message ? event.reason.message : String(event.reason));
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
