@@ -1,0 +1,146 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(ownerId) {
+      return request.auth != null && request.auth.uid == ownerId;
+    }
+
+    function validMember(data, memberId) {
+      return data.memberId == memberId
+        && data.name is string
+        && data.name.size() > 0
+        && data.phone is string
+        && data.chittiId is string
+        && data.chitTotalPaise is int
+        && data.chitTotalPaise > 0
+        && data.monthlyPaise is int
+        && data.monthlyPaise > 0
+        && data.durationMonths is int
+        && data.durationMonths > 0
+        && data.durationMonths <= 600
+        && data.startDate is string
+        && data.endDate is string
+        && data.endDate >= data.startDate
+        && data.joinDate is string
+        && data.status in ['due', 'uptodate', 'overdue', 'completed'];
+    }
+
+    match /businesses/{ownerId}/members/{memberId} {
+      allow read: if isOwner(ownerId);
+      allow create: if isOwner(ownerId)
+        && validMember(request.resource.data, memberId)
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+      allow update: if isOwner(ownerId)
+        && validMember(request.resource.data, memberId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly([
+            'name', 'phone', 'nominee', 'address', 'status',
+            'prizeMoneyLifted', 'chittiCompleted', 'updatedAt'
+          ])
+        && (!('prizeMoneyLifted' in request.resource.data)
+          || request.resource.data.prizeMoneyLifted is bool)
+        && (!('chittiCompleted' in request.resource.data)
+          || request.resource.data.chittiCompleted is bool)
+        && request.resource.data.updatedAt is timestamp;
+      allow delete: if isOwner(ownerId);
+
+      match /installments/{installmentMonth} {
+        allow read: if isOwner(ownerId);
+        allow create, update: if isOwner(ownerId)
+          && installmentMonth.matches('^[0-9]{4}-[0-9]{2}$')
+          && request.resource.data.installmentMonth == installmentMonth
+          && request.resource.data.duePaise is int
+          && request.resource.data.duePaise > 0
+          && request.resource.data.receivedPaise is int
+          && request.resource.data.receivedPaise >= 0
+          && request.resource.data.receivedPaise <= request.resource.data.duePaise
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isOwner(ownerId);
+      }
+
+      match /paymentKeys/{keyId} {
+        allow read: if isOwner(ownerId);
+        allow create: if isOwner(ownerId)
+          && request.resource.data.paymentId is string
+          && request.resource.data.createdAt is timestamp
+          && existsAfter(
+            /databases/$(database)/documents/businesses/$(ownerId)/payments/$(request.resource.data.paymentId)
+          );
+        allow delete: if isOwner(ownerId);
+        allow update: if false;
+      }
+    }
+
+    match /businesses/{ownerId}/chittis/{groupId} {
+      allow read: if isOwner(ownerId);
+      allow create: if isOwner(ownerId)
+        && request.resource.data.groupId == groupId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 100
+        && request.resource.data.shortName is string
+        && request.resource.data.chitTotalPaise is int
+        && request.resource.data.chitTotalPaise >= 0
+        && request.resource.data.monthlyPaise is int
+        && request.resource.data.monthlyPaise >= 0
+        && request.resource.data.durationMonths is int
+        && request.resource.data.durationMonths >= 0
+        && request.resource.data.durationMonths <= 600
+        && request.resource.data.createdAt is timestamp
+        && request.resource.data.updatedAt is timestamp;
+      allow update: if false;
+      allow delete: if isOwner(ownerId);
+    }
+
+    match /businesses/{ownerId}/deletedChittis/{groupId} {
+      allow read: if isOwner(ownerId);
+      allow create: if isOwner(ownerId)
+        && request.resource.data.groupId == groupId
+        && request.resource.data.name is string
+        && request.resource.data.shortName is string
+        && request.resource.data.deletedAt is timestamp;
+      allow update, delete: if false;
+    }
+
+    match /businesses/{ownerId}/payments/{paymentId} {
+      allow read: if isOwner(ownerId);
+      allow create: if isOwner(ownerId)
+        && request.resource.data.memberId is string
+        && request.resource.data.memberName is string
+        && request.resource.data.chittiId is string
+        && request.resource.data.amountPaise is int
+        && request.resource.data.amountPaise > 0
+        && request.resource.data.duePaise is int
+        && request.resource.data.duePaise > 0
+        && request.resource.data.amountPaise <= request.resource.data.duePaise
+        && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.installmentMonth.matches('^[0-9]{4}-[0-9]{2}$')
+        && request.resource.data.mode in ['online', 'cash', 'cheque']
+        && request.resource.data.receiptId is string
+        && request.resource.data.createdAt is timestamp
+        && exists(
+          /databases/$(database)/documents/businesses/$(ownerId)/members/$(request.resource.data.memberId)
+        )
+        && getAfter(
+          /databases/$(database)/documents/businesses/$(ownerId)/members/$(request.resource.data.memberId)/installments/$(request.resource.data.installmentMonth)
+        ).data.duePaise == request.resource.data.duePaise
+        && getAfter(
+          /databases/$(database)/documents/businesses/$(ownerId)/members/$(request.resource.data.memberId)/installments/$(request.resource.data.installmentMonth)
+        ).data.receivedPaise == (
+          (exists(
+            /databases/$(database)/documents/businesses/$(ownerId)/members/$(request.resource.data.memberId)/installments/$(request.resource.data.installmentMonth)
+          )
+            ? get(
+              /databases/$(database)/documents/businesses/$(ownerId)/members/$(request.resource.data.memberId)/installments/$(request.resource.data.installmentMonth)
+            ).data.receivedPaise
+            : 0) + request.resource.data.amountPaise
+        );
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
