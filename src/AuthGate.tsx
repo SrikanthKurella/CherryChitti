@@ -1,13 +1,81 @@
 import { Component, useEffect, useState, type ErrorInfo, type FormEvent, type ReactNode } from 'react';
 import {
-  createUserWithEmailAndPassword,
   onAuthStateChanged,
   sendPasswordResetEmail,
+  signInWithCustomToken,
   signInWithEmailAndPassword,
+  signOut,
   type User,
 } from 'firebase/auth';
-import { firebaseAuth, firebaseConfigured } from './firebase';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { firebaseApp, firebaseAuth, firebaseConfigured } from './firebase';
 import ChittiBusinessApp from './App';
+
+declare global {
+  interface Window {
+    AndroidBiometric?: {
+      isAvailable: () => boolean;
+      isEnabled: () => boolean;
+      enable: () => void;
+      disable: () => void;
+    };
+    onAndroidBiometricSetup?: (enabled: boolean, message: string) => void;
+  }
+}
+
+function BiometricSessionControls() {
+  const [state, setState] = useState(() => {
+    const biometric = window.AndroidBiometric;
+    return {
+      available: biometric?.isAvailable() ?? false,
+      enabled: biometric?.isEnabled() ?? false,
+      message: '',
+    };
+  });
+
+  useEffect(() => {
+    window.onAndroidBiometricSetup = (enabled, message) => {
+      setState(current => ({ ...current, enabled, message: enabled ? '' : message }));
+    };
+    return () => {
+      delete window.onAndroidBiometricSetup;
+    };
+  }, []);
+
+  if (!window.AndroidBiometric || state.enabled) return null;
+
+  return (
+    <section className="mx-auto mt-4 w-full max-w-2xl rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h2 className="text-sm font-bold text-slate-900">Fingerprint sign-in</h2>
+          {!state.enabled && (
+            <p className="mt-1 text-xs text-slate-600">
+              {!state.available
+                ? 'Fingerprint is not set up or supported yet. In Android Settings, add a fingerprint/screen lock, then reopen Cherry Chits.'
+                : 'Enable fingerprint to unlock this phone after signing in with your password.'}
+            </p>
+          )}
+          {state.message && <p role="status" className="mt-1 text-xs font-medium text-emerald-800">{state.message}</p>}
+        </div>
+        <button
+          type="button"
+          disabled={!state.available}
+          onClick={() => state.enabled
+            ? window.AndroidBiometric?.disable()
+            : window.AndroidBiometric?.enable()}
+          className={`min-h-11 touch-manipulation rounded-xl px-4 py-2 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-50 ${
+            state.enabled
+              ? 'border border-slate-200 bg-slate-50 text-slate-700 active:bg-slate-100'
+              : 'bg-emerald-700 text-white active:bg-emerald-800'
+          }`}
+        >
+          Enable fingerprint
+        </button>
+      </div>
+    </section>
+  );
+}
 
 class DashboardErrorBoundary extends Component<
   { children: ReactNode },
@@ -159,6 +227,8 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [otpChallengeId, setOtpChallengeId] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -168,7 +238,29 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
     try {
       if (!firebaseAuth) throw new Error('Firebase Authentication is not configured.');
       if (registering) {
-        await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+        if (!firebaseApp) throw new Error('Firebase is not configured.');
+        const functions = getFunctions(firebaseApp, 'us-central1');
+        if (!otpChallengeId) {
+          const beginSignup = httpsCallable<{ email: string }, { challengeId: string; message: string }>(
+            functions,
+            'beginSignup',
+          );
+          const response = await beginSignup({ email: email.trim() });
+          setOtpChallengeId(response.data.challengeId);
+          setNotice(response.data.message);
+          return;
+        }
+        const finishSignup = httpsCallable<
+          { challengeId: string; email: string; code: string; password: string },
+          { customToken: string }
+        >(functions, 'finishSignup');
+        const response = await finishSignup({
+          challengeId: otpChallengeId,
+          email: email.trim(),
+          code: verificationCode.trim(),
+          password,
+        });
+        await signInWithCustomToken(firebaseAuth, response.data.customToken);
       } else {
         await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
       }
@@ -214,6 +306,7 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
               type="email"
               required
               autoComplete="email"
+              readOnly={registering && !!otpChallengeId}
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 font-normal outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
@@ -231,6 +324,31 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
               className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 font-normal outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
             />
           </label>
+          {registering && otpChallengeId && (
+            <>
+              <label className="block text-sm font-semibold text-slate-700">
+                Email verification code
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  required
+                  value={verificationCode}
+                  onChange={event => setVerificationCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 font-normal tracking-[0.35em] outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => { setOtpChallengeId(''); setVerificationCode(''); setError(''); setNotice(''); }}
+                className="w-full py-1 text-sm font-semibold text-emerald-800"
+              >
+                Change email or request a new code
+              </button>
+            </>
+          )}
           {error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-800">{error}</p>}
           {notice && <p role="status" className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
           <button
@@ -238,7 +356,11 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
             disabled={working}
             className="w-full rounded-xl bg-emerald-700 px-4 py-3 font-bold text-white hover:bg-emerald-800 disabled:opacity-60"
           >
-            {working ? 'Please wait…' : registering ? 'Create secure account' : 'Sign in'}
+            {working
+              ? 'Please wait…'
+              : registering
+                ? otpChallengeId ? 'Verify code and create account' : 'Send verification code'
+                : 'Sign in'}
           </button>
         </form>
         {!registering && (
@@ -248,7 +370,13 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
         )}
         <button
           type="button"
-          onClick={() => { setRegistering(!registering); setError(''); setNotice(''); }}
+          onClick={() => {
+            setRegistering(!registering);
+            setError('');
+            setNotice('');
+            setOtpChallengeId('');
+            setVerificationCode('');
+          }}
           className="mt-2 w-full py-2 text-sm text-slate-600"
         >
           {registering ? 'Already registered? Sign in' : 'Create an account'}
@@ -267,6 +395,7 @@ function AuthScreen({ onEditConfig }: { onEditConfig: () => void }) {
 export default function AuthGate() {
   const [user, setUser] = useState<User | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [authSetupError, setAuthSetupError] = useState('');
   const editFirebaseConfig = () => {
     window.localStorage.setItem('cherry-chits-edit-firebase-config', 'true');
     window.location.reload();
@@ -277,17 +406,61 @@ export default function AuthGate() {
       setCheckingAuth(false);
       return;
     }
-    return onAuthStateChanged(firebaseAuth, (nextUser) => {
-      setUser(nextUser);
-      setCheckingAuth(false);
-    });
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+    const forcePasswordLogin = new URLSearchParams(window.location.search).get('reauth') === '1';
+    const observeAuth = () => {
+      if (cancelled) return;
+      if (forcePasswordLogin) {
+        window.history.replaceState({}, '', window.location.pathname + window.location.hash);
+      }
+      unsubscribe = onAuthStateChanged(firebaseAuth, (nextUser) => {
+        setUser(nextUser);
+        setCheckingAuth(false);
+      }, (error) => {
+        setAuthSetupError(error.message);
+        setCheckingAuth(false);
+      });
+    };
+
+    if (forcePasswordLogin) {
+      signOut(firebaseAuth)
+        .then(observeAuth)
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setAuthSetupError(error instanceof Error ? error.message : 'Could not sign out the saved session.');
+          setCheckingAuth(false);
+        });
+    } else {
+      observeAuth();
+    }
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, []);
 
   if (!firebaseConfigured) return <FirebaseSetupRequired />;
   if (checkingAuth) {
     return <main className="min-h-screen grid place-items-center bg-slate-50"><span className="text-emerald-800">Loading secure session…</span></main>;
   }
+  if (checkingAuth) {
+    return <main className="min-h-screen grid place-items-center bg-slate-50"><span className="text-emerald-800">Loading secure session…</span></main>;
+  }
+  if (authSetupError) {
+    return (
+      <main className="min-h-screen grid place-items-center bg-slate-50 p-5">
+        <p role="alert" className="max-w-md rounded-xl bg-rose-50 p-4 text-sm text-rose-800">
+          Could not initialize secure sign-in: {authSetupError}
+        </p>
+      </main>
+    );
+  }
   return user
-    ? <DashboardErrorBoundary><ChittiBusinessApp /></DashboardErrorBoundary>
+    ? <>
+        <BiometricSessionControls />
+        <DashboardErrorBoundary><ChittiBusinessApp /></DashboardErrorBoundary>
+      </>
     : <AuthScreen onEditConfig={editFirebaseConfig} />;
 }

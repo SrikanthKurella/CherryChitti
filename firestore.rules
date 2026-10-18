@@ -139,6 +139,18 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /signupOtpChallenges/{challengeId} {
+      allow read, write: if false;
+    }
+
+    match /signupOtpRateLimits/{emailHash} {
+      allow read, write: if false;
+    }
+
+    match /signupOtpIpRateLimits/{ipHash} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

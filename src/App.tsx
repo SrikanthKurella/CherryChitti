@@ -44,6 +44,15 @@ import {
   Trash2
 } from 'lucide-react';
 
+declare global {
+  interface Window {
+    AndroidContacts?: {
+      pickContact: () => void;
+    };
+    onAndroidContactSelected?: (name: string, phone: string) => void;
+  }
+}
+
 // --- CURRENCY & TIMEZONE UTILS (Asia/Kolkata & INR) ---
 const formatINR = (val) => {
   const num = Number(val) || 0;
@@ -467,8 +476,16 @@ const INITIAL_PAYMENTS = [
 export default function ChittiBusinessApp() {
   // Navigation State
   const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'members' | 'payments' | 'chittis' | 'reports'
+  const previousTabRef = useRef(activeTab);
+  const restoringTabFromHistoryRef = useRef(false);
   const [selectedChittiFilter, setSelectedChittiFilter] = useState('ALL');
-  const [selectedMonth, setSelectedMonth] = useState("October 2026");
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const [year, month] = getKolkataDateString().split('-').map(Number);
+    return new Date(year, month - 1, 1).toLocaleDateString('en-US', {
+      month: 'long',
+      year: 'numeric'
+    });
+  });
   // Business Data State
   const [members, setMembers] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -485,8 +502,46 @@ export default function ChittiBusinessApp() {
   const [activeReceipt, setActiveReceipt] = useState(null);
   const [memberDetailModal, setMemberDetailModal] = useState(null);
   const [notification, setNotification] = useState(null);
+  const [pendingDeletion, setPendingDeletion] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [newGroupForm, setNewGroupForm] = useState({ name: '', totalAmount: '', durationMonths: '' });
   const vCardInputRef = useRef(null);
+
+  useEffect(() => {
+    const availableTabs = ['dashboard', 'members', 'payments', 'chittis', 'reports'];
+    if (!availableTabs.includes(window.history.state?.cherryChitsTab)) {
+      window.history.replaceState(
+        { ...window.history.state, cherryChitsTab: activeTab },
+        '',
+      );
+    }
+
+    const restoreTabFromHistory = (event: PopStateEvent) => {
+      const tab = event.state?.cherryChitsTab;
+      if (typeof tab === 'string' && availableTabs.includes(tab)) {
+        restoringTabFromHistoryRef.current = true;
+        setActiveTab(tab);
+      }
+    };
+
+    window.addEventListener('popstate', restoreTabFromHistory);
+    return () => window.removeEventListener('popstate', restoreTabFromHistory);
+  }, []);
+
+  useEffect(() => {
+    if (previousTabRef.current === activeTab) return;
+    previousTabRef.current = activeTab;
+
+    if (restoringTabFromHistoryRef.current) {
+      restoringTabFromHistoryRef.current = false;
+      return;
+    }
+
+    window.history.pushState(
+      { ...window.history.state, cherryChitsTab: activeTab },
+      '',
+    );
+  }, [activeTab]);
 
   // Search & Filters
   const [searchQuery, setSearchQuery] = useState("");
@@ -550,7 +605,6 @@ export default function ChittiBusinessApp() {
     referenceId: "",
     notes: ""
   });
-  const [duplicateWarning, setDuplicateWarning] = useState("");
   const initialMemberGroup = CHITTI_GROUPS[0] || EMPTY_CHITTI_GROUP;
 
   // New Member Form State
@@ -569,6 +623,58 @@ export default function ChittiBusinessApp() {
   const notify = (msg, type = "success") => {
     setNotification({ msg, type });
     setTimeout(() => setNotification(null), 3500);
+  };
+
+  const applyPickedContact = (name, phone) => {
+    const digits = String(phone || '').replace(/\D/g, '');
+    const indianNumber = digits.length === 12 && digits.startsWith('91')
+      ? digits.slice(2)
+      : digits.length === 11 && digits.startsWith('0')
+        ? digits.slice(1)
+        : digits;
+    if (!indianNumber || indianNumber.length !== 10) {
+      notify('The selected contact does not have a valid 10-digit Indian mobile number.', 'error');
+      return;
+    }
+
+    setNewMemberForm(current => ({
+      ...current,
+      ...(String(name || '').trim() ? { name: String(name).trim() } : {}),
+      phone: indianNumber
+    }));
+  };
+
+  useEffect(() => {
+    window.onAndroidContactSelected = applyPickedContact;
+    return () => {
+      delete window.onAndroidContactSelected;
+    };
+  }, []);
+
+  const pickMemberContact = async () => {
+    if (window.AndroidContacts?.pickContact) {
+      window.AndroidContacts.pickContact();
+      return;
+    }
+
+    const contactPicker = (navigator as Navigator & {
+      contacts?: {
+        select: (properties: string[], options: { multiple: boolean }) => Promise<Array<{ name?: string[]; tel?: string[] }>>;
+      };
+    }).contacts;
+    if (!contactPicker?.select) {
+      notify('Contact selection is available in the Cherry Chits Android app. You can enter the number manually here.', 'error');
+      return;
+    }
+
+    try {
+      const [contact] = await contactPicker.select(['name', 'tel'], { multiple: false });
+      if (contact) applyPickedContact(contact.name?.[0] || '', contact.tel?.[0] || '');
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        notify(`Could not open contacts: ${error.message || 'Please enter the number manually.'}`, 'error');
+      }
+    }
   };
 
   const todayStr = getKolkataDateString();
@@ -809,12 +915,45 @@ export default function ChittiBusinessApp() {
     });
   }, [members, selectedChittiFilter, searchQuery, statusFilter, memberFinancials, CHITTI_GROUPS]);
 
-  // Unique list of available months for passbook browsing
+  // Show every month from the oldest saved record through future member periods.
   const availableMonths = useMemo(() => {
-    const set = new Set(["October 2026", "September 2026", "August 2026", "July 2026"]);
-    payments.forEach(p => set.add(p.month));
-    return Array.from(set);
-  }, [payments]);
+    const [year, month] = getKolkataDateString().split('-').map(Number);
+    let firstMonth = new Date(year, month - 13, 1);
+    let lastMonth = new Date(year, month + 11, 1);
+
+    const includeDate = (dateString) => {
+      const match = /^(\d{4})-(\d{2})/.exec(dateString || '');
+      if (!match) return;
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, 1);
+      if (date < firstMonth) firstMonth = date;
+      if (date > lastMonth) lastMonth = date;
+    };
+
+    members.forEach(member => {
+      includeDate(getMemberStartDate(member));
+      includeDate(member.endDate);
+    });
+    payments.forEach(payment => {
+      includeDate(payment.date);
+      if (payment.month) {
+        const paymentMonth = new Date(`${payment.month} 1`);
+        if (!Number.isNaN(paymentMonth.getTime())) {
+          includeDate(`${paymentMonth.getFullYear()}-${String(paymentMonth.getMonth() + 1).padStart(2, '0')}-01`);
+        }
+      }
+    });
+
+    const months = new Set<string>();
+    for (
+      let date = firstMonth;
+      date <= lastMonth;
+      date = new Date(date.getFullYear(), date.getMonth() + 1, 1)
+    ) {
+      months.add(date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }));
+    }
+
+    return Array.from(months);
+  }, [members, payments]);
 
   // --- ACTIONS ---
 
@@ -907,28 +1046,31 @@ export default function ChittiBusinessApp() {
     await batch.commit();
   };
 
-  const deleteMember = async (member) => {
-    const confirmed = window.confirm(
-      `Permanently delete ${member.name}'s member record and installment tracking? Payment transactions and receipts will remain in history. This cannot be undone.`
-    );
-    if (!confirmed) return;
+  const deleteMember = (member) => {
+    setPendingDeletion({ kind: 'member', record: member });
+  };
 
+  const confirmMemberDeletion = async (member) => {
+    setIsDeleting(true);
     try {
       const memberRef = doc(collection(currentBusinessRef(), 'members'), member.id);
       const cleanup = await getMemberCleanupSnapshots(memberRef);
       await commitMemberDeletion(cleanup);
+      setPendingDeletion(null);
       notify(`${member.name} was deleted. Their payment and receipt history was preserved.`);
     } catch (error) {
       notify(`Member could not be deleted: ${error.message || 'Please try again.'}`, 'error');
+    } finally {
+      setIsDeleting(false);
     }
   };
 
-  const deleteChittiGroup = async (group) => {
-    const confirmed = window.confirm(
-      `Permanently delete ${group.name} and all of its member records? Payment transactions and receipts will remain in history. This cannot be undone.`
-    );
-    if (!confirmed) return;
+  const deleteChittiGroup = (group) => {
+    setPendingDeletion({ kind: 'group', record: group });
+  };
 
+  const confirmChittiGroupDeletion = async (group) => {
+    setIsDeleting(true);
     let deletionStep = 'loading group members';
     try {
       const businessRef = currentBusinessRef();
@@ -961,6 +1103,7 @@ export default function ChittiBusinessApp() {
         await finalBatch.commit();
       }
       if (selectedChittiFilter === group.id) setSelectedChittiFilter('ALL');
+      setPendingDeletion(null);
       notify(`${group.name} and ${groupMembers.length} member record(s) were deleted. Payment history was preserved.`);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Please try again.';
@@ -975,6 +1118,8 @@ export default function ChittiBusinessApp() {
         `Group deletion failed while ${deletionStep}: ${errorMessage}.${permissionHint} Payment transactions and receipts were not deleted. Some member records may already have been removed; refresh to check before retrying.`,
         'error'
       );
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -1010,7 +1155,7 @@ export default function ChittiBusinessApp() {
     const fin = memberFinancials[member.id];
     const monthlyAmount = getMemberMonthlyAmount(member, chitti);
     
-    // Suggested amount defaults to current pending balance or full installment
+    // Suggested amount defaults to the current pending balance or full installment.
     const suggested = fin?.monthPending > 0 ? fin.monthPending : monthlyAmount;
 
     setPaymentForm({
@@ -1021,11 +1166,10 @@ export default function ChittiBusinessApp() {
       referenceId: "",
       notes: ""
     });
-    setDuplicateWarning("");
     setIsUpdateMoneyOpen(true);
   };
 
-  const handleRecordPayment = (e) => {
+  const handleRecordPayment = async (e) => {
     e.preventDefault();
     if (!selectedMemberForPayment) return;
 
@@ -1043,116 +1187,162 @@ export default function ChittiBusinessApp() {
       return;
     }
 
-    const duplicate = payments.find(p =>
-      p.memberId === selectedMemberForPayment.id &&
-      p.month === paymentForm.month &&
-      p.date === paymentForm.date &&
-      Number(p.amount) === amountNum
-    );
-
-    if (duplicate) {
-      setDuplicateWarning(
-        `This exact payment already exists for ${selectedMemberForPayment.name}. Duplicate entries are blocked.`
-      );
-      return;
-    }
-
     const amountPaise = Math.round(amountNum * 100);
     const monthDate = new Date(`${paymentForm.month} 1`);
     if (Number.isNaN(monthDate.getTime())) {
       notify('Select a valid installment month.', 'error');
       return;
     }
-    const installmentMonth = `${monthDate.getFullYear()}-${String(monthDate.getMonth() + 1).padStart(2, '0')}`;
     const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
     const startDate = new Date(`${selectedMemberForPayment.startDate}T00:00:00`);
     const durationMonths = getMemberDuration(selectedMemberForPayment, chitti || EMPTY_CHITTI_GROUP);
     const installmentIndex = (monthStart.getFullYear() - startDate.getFullYear()) * 12 +
       monthStart.getMonth() - startDate.getMonth();
+    const startMonth = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
     const monthlyPaise = Math.round(getMemberMonthlyAmount(selectedMemberForPayment, chitti || EMPTY_CHITTI_GROUP) * 100);
-    const finalInstallmentPaise = Math.max(0, Math.round(memberTotalValue * 100) - monthlyPaise * (durationMonths - 1));
-    const duePaise = installmentIndex === durationMonths - 1 ? finalInstallmentPaise : monthlyPaise;
     if (!memberIsScheduledInMonth(
       selectedMemberForPayment,
       chitti || EMPTY_CHITTI_GROUP,
       paymentForm.month
-    ) || duePaise <= 0) {
+    ) || installmentIndex < 0 || installmentIndex >= durationMonths || monthlyPaise <= 0) {
       notify('The selected installment month is outside this member’s schedule.', 'error');
       return;
     }
 
     const businessRef = currentBusinessRef();
     const memberRef = doc(collection(businessRef, 'members'), selectedMemberForPayment.id);
-    const paymentRef = doc(collection(businessRef, 'payments'));
-    const installmentRef = doc(collection(memberRef, 'installments'), installmentMonth);
-    const duplicateKey = `${selectedMemberForPayment.id}_${installmentMonth}_${paymentForm.date}_${amountPaise}`;
-    const duplicateRef = doc(collection(memberRef, 'paymentKeys'), duplicateKey);
+    const paymentMode = paymentForm.paymentMode === 'UPI' || paymentForm.paymentMode === 'Bank Transfer'
+      ? 'online'
+      : paymentForm.paymentMode === 'Cheque' ? 'cheque' : 'cash';
+    const batchReceiptId = `REC-${paymentForm.date.slice(0, 4)}-${doc(collection(businessRef, 'payments')).id.toUpperCase()}`;
+    const allocations = [];
+    let remainingToAllocatePaise = amountPaise;
+    let allocationError = null;
 
-    runTransaction(firestoreDb, async transaction => {
-      const [memberSnapshot, installmentSnapshot, duplicateSnapshot] = await Promise.all([
-        transaction.get(memberRef),
-        transaction.get(installmentRef),
-        transaction.get(duplicateRef)
-      ]);
-      if (!memberSnapshot.exists()) throw new Error('Member record no longer exists.');
-      if (duplicateSnapshot.exists()) throw new Error('This payment was already recorded.');
-      const paidPaise = installmentSnapshot.exists()
-        ? installmentSnapshot.data().receivedPaise
-        : 0;
-      if (paidPaise + amountPaise > duePaise) {
-        throw new Error(`Amount is more than the installment balance of ${formatINR((duePaise - paidPaise) / 100)}.`);
-      }
+    for (let scheduleIndex = installmentIndex;
+      scheduleIndex < durationMonths && remainingToAllocatePaise > 0;
+      scheduleIndex += 1) {
+      const targetMonthDate = new Date(startMonth.getFullYear(), startMonth.getMonth() + scheduleIndex, 1);
+      const installmentMonth = `${targetMonthDate.getFullYear()}-${String(targetMonthDate.getMonth() + 1).padStart(2, '0')}`;
+      const monthLabel = targetMonthDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      if (!memberIsScheduledInMonth(selectedMemberForPayment, chitti || EMPTY_CHITTI_GROUP, monthLabel)) continue;
 
-      const paymentMode = paymentForm.paymentMode === 'UPI' || paymentForm.paymentMode === 'Bank Transfer'
-        ? 'online'
-        : paymentForm.paymentMode === 'Cheque' ? 'cheque' : 'cash';
-      const receiptId = `REC-${paymentForm.date.slice(0, 4)}-${paymentRef.id.toUpperCase()}`;
-      const newPayment = {
-        memberId: selectedMemberForPayment.id,
-        chittiId: selectedMemberForPayment.chittiId,
-        chittiName: chitti?.name || getChittiLabel(selectedMemberForPayment.chittiId),
-        memberName: selectedMemberForPayment.name,
-        amountPaise,
-        date: paymentForm.date,
-        installmentMonth,
-        month: paymentForm.month,
-        paymentMode,
-        mode: paymentMode,
-        referenceId: paymentForm.referenceId.trim(),
-        notes: paymentForm.notes.trim(),
-        collectedBy: INITIAL_BUSINESS_PROFILE.owner,
-        receiptId,
-        duePaise,
-        createdAt: serverTimestamp()
-      };
-      transaction.set(paymentRef, newPayment);
-      transaction.set(installmentRef, {
-        installmentMonth,
-        duePaise,
-        receivedPaise: paidPaise + amountPaise,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-      transaction.set(duplicateRef, {
-        paymentId: paymentRef.id,
-        createdAt: serverTimestamp()
-      });
-      return { ...newPayment, firestoreId: paymentRef.id, amount: amountPaise / 100, id: receiptId };
-    }).then(payment => {
-      const newRemainingBalance = Math.max(
+      const finalInstallmentPaise = Math.max(
         0,
-        memberTotalValue - ((memberFinancials[selectedMemberForPayment.id]?.totalPaidLifetime || 0) + amountNum)
+        Math.round(memberTotalValue * 100) - monthlyPaise * (durationMonths - 1)
       );
-      setIsUpdateMoneyOpen(false);
-      setDuplicateWarning('');
-      notify(`Payment of ${formatINR(amountNum)} saved securely for ${selectedMemberForPayment.name}.`);
-      setActiveReceipt({
-        ...payment,
-        chittiName: chitti?.name,
-        totalChitValue: memberTotalValue,
-        updatedRemainingBalance: newRemainingBalance
-      });
-    }).catch(error => {
-      notify(error.message || 'Payment could not be saved. No collection was recorded.', 'error');
+      const duePaise = scheduleIndex === durationMonths - 1 ? finalInstallmentPaise : monthlyPaise;
+      if (duePaise <= 0) continue;
+
+      try {
+        const allocation = await runTransaction(firestoreDb, async transaction => {
+          const installmentRef = doc(collection(memberRef, 'installments'), installmentMonth);
+          const memberSnapshot = await transaction.get(memberRef);
+          const installmentSnapshot = await transaction.get(installmentRef);
+          if (!memberSnapshot.exists()) throw new Error('Member record no longer exists.');
+
+          const paidPaise = installmentSnapshot.exists()
+            ? Number(installmentSnapshot.data().receivedPaise || 0)
+            : 0;
+          const installmentBalancePaise = Math.max(0, duePaise - paidPaise);
+          const allocatedPaise = Math.min(remainingToAllocatePaise, installmentBalancePaise);
+          if (allocatedPaise <= 0) return null;
+
+          const duplicateKey = `${selectedMemberForPayment.id}_${installmentMonth}_${paymentForm.date}_${allocatedPaise}`;
+          const duplicateRef = doc(collection(memberRef, 'paymentKeys'), duplicateKey);
+          const duplicateSnapshot = await transaction.get(duplicateRef);
+          if (duplicateSnapshot.exists()) {
+            throw new Error(`A payment of ${formatINR(allocatedPaise / 100)} was already recorded for ${monthLabel} on this date.`);
+          }
+
+          const paymentRef = doc(collection(businessRef, 'payments'));
+          const receiptId = `REC-${paymentForm.date.slice(0, 4)}-${paymentRef.id.toUpperCase()}`;
+          const newPayment = {
+            memberId: selectedMemberForPayment.id,
+            chittiId: selectedMemberForPayment.chittiId,
+            chittiName: chitti?.name || getChittiLabel(selectedMemberForPayment.chittiId),
+            memberName: selectedMemberForPayment.name,
+            amountPaise: allocatedPaise,
+            date: paymentForm.date,
+            installmentMonth,
+            month: monthLabel,
+            paymentMode,
+            mode: paymentMode,
+            referenceId: paymentForm.referenceId.trim(),
+            notes: paymentForm.notes.trim(),
+            collectedBy: INITIAL_BUSINESS_PROFILE.owner,
+            receiptId,
+            batchReceiptId,
+            duePaise,
+            createdAt: serverTimestamp()
+          };
+          transaction.set(paymentRef, newPayment);
+          transaction.set(installmentRef, {
+            installmentMonth,
+            duePaise,
+            receivedPaise: paidPaise + allocatedPaise,
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+          transaction.set(duplicateRef, {
+            paymentId: paymentRef.id,
+            createdAt: serverTimestamp()
+          });
+          return { ...newPayment, firestoreId: paymentRef.id, amount: allocatedPaise / 100, id: receiptId };
+        });
+
+        if (allocation) {
+          allocations.push(allocation);
+          remainingToAllocatePaise -= Math.round(allocation.amount * 100);
+        }
+      } catch (error) {
+        allocationError = error;
+        break;
+      }
+    }
+
+    const allocatedPaise = allocations.reduce((total, allocation) => total + Math.round(allocation.amount * 100), 0);
+    if (remainingToAllocatePaise > 0) {
+      if (allocations.length > 0) {
+        setIsUpdateMoneyOpen(false);
+        notify(
+          `Recorded ${formatINR(allocatedPaise)} of ${formatINR(amountNum)}. ${formatINR(remainingToAllocatePaise / 100)} was not recorded. ${allocationError?.message || 'No scheduled installment balance remains.'} Check the passbook before retrying.`,
+          'error'
+        );
+        setActiveReceipt({
+          ...allocations[0],
+          id: allocations.length === 1 ? allocations[0].id : batchReceiptId,
+          amount: allocatedPaise / 100,
+          allocations: allocations.map(allocation => ({
+            month: allocation.month,
+            amount: allocation.amount,
+            receiptId: allocation.id
+          })),
+          totalChitValue: memberTotalValue,
+          updatedRemainingBalance: Math.max(0, remainingAmount - allocatedPaise / 100)
+        });
+      } else {
+        notify(
+          allocationError?.message || `No scheduled installment balance is available for ${formatINR(amountNum)}.`,
+          'error'
+        );
+      }
+      return;
+    }
+
+    const newRemainingBalance = Math.max(0, remainingAmount - amountNum);
+    setIsUpdateMoneyOpen(false);
+    notify(`Payment of ${formatINR(amountNum)} saved securely for ${selectedMemberForPayment.name}.`);
+    setActiveReceipt({
+      ...allocations[0],
+      id: allocations.length === 1 ? allocations[0].id : batchReceiptId,
+      amount: amountNum,
+      allocations: allocations.map(allocation => ({
+        month: allocation.month,
+        amount: allocation.amount,
+        receiptId: allocation.id
+      })),
+      totalChitValue: memberTotalValue,
+      updatedRemainingBalance: newRemainingBalance
     });
   };
 
@@ -2473,9 +2663,11 @@ export default function ChittiBusinessApp() {
                         Update Money: {selectedMemberForPayment.name}
                       </h3>
                     </div>
-                    <button 
+                    <button
+                      type="button"
                       onClick={() => setIsUpdateMoneyOpen(false)}
-                      className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
+                      aria-label="Close payment form"
+                      className="relative z-10 flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center text-slate-500 hover:text-slate-700 rounded-xl hover:bg-slate-100 active:bg-slate-200"
                     >
                       <X className="w-5 h-5" />
                     </button>
@@ -2501,7 +2693,7 @@ export default function ChittiBusinessApp() {
                   <form onSubmit={handleRecordPayment} className="space-y-4">
                     <div>
                       <label className="block text-xs font-bold text-slate-700 mb-1">
-                        Amount Received (₹ INR) *
+                        Amount Received Now (₹ INR) *
                       </label>
                       <div className="relative">
                         <span className="absolute left-3.5 top-2.5 text-slate-400 font-bold text-lg">₹</span>
@@ -2512,11 +2704,14 @@ export default function ChittiBusinessApp() {
                           value={paymentForm.amount}
                           onChange={(e) => {
                             setPaymentForm({...paymentForm, amount: e.target.value});
-                            setDuplicateWarning("");
                           }}
                           className="w-full pl-9 pr-4 py-2.5 bg-white border-2 border-emerald-500/40 focus:border-emerald-600 rounded-xl font-bold text-lg text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-200"
                         />
                       </div>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        This payment covers the selected installment first. Any extra is applied to upcoming unpaid
+                        installments automatically, with a separate receipt entry for each month.
+                      </p>
                       
                       {/* Fast Pill Buttons */}
                       <div className="flex gap-2 mt-1.5">
@@ -2615,17 +2810,6 @@ export default function ChittiBusinessApp() {
                       />
                     </div>
 
-                    {/* Duplicate Guard Trigger */}
-                    {duplicateWarning && (
-                      <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-800 flex items-start gap-2">
-                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                        <div>
-                          <span className="font-bold">Duplicate Warning</span>
-                          <p className="mt-0.5">{duplicateWarning}</p>
-                        </div>
-                      </div>
-                    )}
-
                     <div className="pt-2 flex items-center justify-end gap-2">
                       <button
                         type="button"
@@ -2639,7 +2823,7 @@ export default function ChittiBusinessApp() {
                         className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-xl text-xs font-bold shadow-md shadow-emerald-600/30 flex items-center gap-1.5"
                       >
                         <Check className="w-4 h-4" />
-                        <span>{duplicateWarning ? "Confirm Duplicate & Record" : "Save Payment & Issue Receipt"}</span>
+                        <span>Save Payment & Issue Receipt</span>
                       </button>
                     </div>
 
@@ -2656,16 +2840,18 @@ export default function ChittiBusinessApp() {
           MODAL 2: PRINTABLE DIGITAL RECEIPT WITH REMAINING BALANCE
       ======================================================== */}
       {activeReceipt && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 border border-slate-200 animate-scaleUp">
-            
-            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2">
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto p-4 sm:p-6 border border-slate-200 animate-scaleUp">
+
+            <div className="sticky top-0 z-20 -mx-4 sm:-mx-6 -mt-4 sm:-mt-6 mb-4 flex items-center justify-between border-b border-slate-100 bg-white/95 px-4 py-2 backdrop-blur sm:px-6">
               <span className="text-xs font-bold text-slate-400">Official Payment Slip</span>
-              <button 
+              <button
+                type="button"
                 onClick={() => setActiveReceipt(null)}
-                className="p-1 text-slate-400 hover:text-slate-600"
+                aria-label="Close receipt"
+                className="relative z-10 flex h-12 w-12 shrink-0 touch-manipulation items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:bg-slate-100 active:bg-slate-200"
               >
-                <X className="w-5 h-5" />
+                <X className="h-6 w-6" />
               </button>
             </div>
 
@@ -2710,8 +2896,26 @@ export default function ChittiBusinessApp() {
 
                 <div className="flex justify-between">
                   <span className="text-slate-500">Installment Month:</span>
-                  <span className="font-bold text-emerald-700">{activeReceipt.month}</span>
+                  <span className="font-bold text-emerald-700">
+                    {activeReceipt.allocations?.length > 1
+                      ? `${activeReceipt.allocations.length} installments`
+                      : activeReceipt.month}
+                  </span>
                 </div>
+
+                {activeReceipt.allocations?.length > 1 && (
+                  <div className="rounded-lg border border-slate-200 divide-y divide-slate-100">
+                    {activeReceipt.allocations.map(allocation => (
+                      <div key={allocation.month} className="flex justify-between gap-3 px-2 py-1.5">
+                        <span className="text-slate-600">
+                          {allocation.month}
+                          <span className="block font-mono text-[9px] text-slate-400">{allocation.receiptId}</span>
+                        </span>
+                        <span className="font-semibold text-slate-800">{formatINR(allocation.amount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 <div className="flex justify-between">
                   <span className="text-slate-500">Mode / Ref:</span>
@@ -2759,6 +2963,15 @@ export default function ChittiBusinessApp() {
               </button>
             </div>
 
+            <button
+              type="button"
+              onClick={() => setActiveReceipt(null)}
+              className="mt-3 flex min-h-12 w-full touch-manipulation items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-sm font-bold text-slate-800 active:bg-slate-200"
+            >
+              <X className="h-5 w-5" />
+              <span>Close receipt</span>
+            </button>
+
           </div>
         </div>
       )}
@@ -2772,8 +2985,9 @@ export default function ChittiBusinessApp() {
                 <p className="text-xs text-slate-500">Set the group name, total pool amount, and installment duration.</p>
               </div>
               <button
+                type="button"
                 onClick={() => setIsAddChittiOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg"
+                className="relative z-10 flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center text-slate-500 hover:text-slate-700 rounded-xl hover:bg-slate-100 active:bg-slate-200"
                 aria-label="Close create group form"
               >
                 <X className="w-5 h-5" />
@@ -2861,9 +3075,11 @@ export default function ChittiBusinessApp() {
                 <h3 className="text-lg font-bold text-slate-900">Enroll New Chitti Member</h3>
                 <p className="text-xs text-slate-500">Register a member in one of your Chitti groups</p>
               </div>
-              <button 
+              <button
+                type="button"
                 onClick={() => setIsAddMemberOpen(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg"
+                aria-label="Close member form"
+                className="relative z-10 flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center text-slate-500 hover:text-slate-700 rounded-xl hover:bg-slate-100 active:bg-slate-200"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -2991,7 +3207,19 @@ export default function ChittiBusinessApp() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Mobile Number (India) *</label>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <label className="block text-xs font-bold text-slate-700">Mobile Number (India) *</label>
+                  <button
+                    type="button"
+                    onClick={pickMemberContact}
+                    aria-label="Choose mobile number from contacts"
+                    title="Choose from contacts"
+                    className="inline-flex min-h-10 touch-manipulation items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 active:bg-emerald-100"
+                  >
+                    <Contact className="h-4 w-4" />
+                    <span>Contacts</span>
+                  </button>
+                </div>
                 <div className="relative">
                   <span className="absolute left-3 top-2.5 text-slate-400 font-bold text-xs">+91</span>
                   <input
@@ -3106,9 +3334,11 @@ export default function ChittiBusinessApp() {
                         <span>+91 {memberDetailModal.phone} · Tap to call</span>
                       </a>
                     </div>
-                    <button 
+                    <button
+                      type="button"
                       onClick={() => setMemberDetailModal(null)}
-                      className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg"
+                      aria-label="Close member details"
+                      className="relative z-10 flex h-11 w-11 shrink-0 touch-manipulation items-center justify-center text-slate-500 hover:text-slate-700 rounded-xl hover:bg-slate-100 active:bg-slate-200"
                     >
                       <X className="w-5 h-5" />
                     </button>
@@ -3236,6 +3466,54 @@ export default function ChittiBusinessApp() {
               );
             })()}
 
+          </div>
+        </div>
+      )}
+
+      {pendingDeletion && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-xs">
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-confirmation-title"
+            aria-describedby="delete-confirmation-description"
+            className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"
+          >
+            <div className="mb-3 flex items-center gap-3">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-rose-50 text-rose-700">
+                <Trash2 className="h-5 w-5" />
+              </span>
+              <h3 id="delete-confirmation-title" className="text-base font-bold text-slate-900">
+                Delete {pendingDeletion.kind === 'member' ? 'member' : 'Chitti group'}?
+              </h3>
+            </div>
+            <p id="delete-confirmation-description" className="mb-5 text-sm leading-6 text-slate-600">
+              Permanently delete {pendingDeletion.record.name}
+              {pendingDeletion.kind === 'member'
+                ? "'s member record and installment tracking"
+                : ' and all its member records'}
+              ? Payment transactions and receipts will remain in history. This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setPendingDeletion(null)}
+                className="min-h-11 touch-manipulation rounded-xl bg-slate-100 px-4 text-sm font-semibold text-slate-700 active:bg-slate-200 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => pendingDeletion.kind === 'member'
+                  ? confirmMemberDeletion(pendingDeletion.record)
+                  : confirmChittiGroupDeletion(pendingDeletion.record)}
+                className="min-h-11 touch-manipulation rounded-xl bg-rose-600 px-4 text-sm font-bold text-white active:bg-rose-700 disabled:opacity-50"
+              >
+                {isDeleting ? 'Deleting…' : 'Delete permanently'}
+              </button>
+            </div>
           </div>
         </div>
       )}

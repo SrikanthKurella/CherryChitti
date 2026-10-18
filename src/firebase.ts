@@ -49,7 +49,7 @@ const configEditRequested = typeof window !== 'undefined'
 export const firebaseConfigured = !configEditRequested
   && Object.values(config).every(isConfiguredValue);
 
-const firebaseApp = firebaseConfigured
+export const firebaseApp = firebaseConfigured
   ? getApps()[0] ?? initializeApp(config)
   : null;
 
